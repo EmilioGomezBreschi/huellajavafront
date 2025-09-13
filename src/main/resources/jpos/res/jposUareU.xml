@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<JposEntries>
+    <JposEntry logicalName="DPFingerprintReader">
+        <creation factoryClass="com.digitalpersona.javapos.services.biometrics.ServiceInstanceFactory"
+                  serviceClass="com.digitalpersona.javapos.services.biometrics.UAREUReader"/>
+        <vendor name="DigitalPersona, Inc." url="http://www.digitalpersona.com/"/>
+        <jpos category="Biometrics" version="1.13"/>
+        <product description="U.are.U Fingerprint Reader" name="U.are.U Reader"
+                 url="http://www.digitalpersona.com/"/>
+        <prop name="dummy" value="1"/>
+    </JposEntry>
+</JposEntries>
