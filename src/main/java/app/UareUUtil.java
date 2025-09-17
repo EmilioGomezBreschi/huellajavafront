@@ -1,82 +1,191 @@
 package app;
 
-import com.digitalpersona.uareu.Engine;
 import com.digitalpersona.uareu.Fid;
 import com.digitalpersona.uareu.Fmd;
 import com.digitalpersona.uareu.Reader;
 import com.digitalpersona.uareu.ReaderCollection;
 import com.digitalpersona.uareu.UareUGlobal;
-import com.digitalpersona.uareu.UareUException;
+
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.List;
 
 public final class UareUUtil {
     private UareUUtil() {}
 
-    /** Abre el primer lector disponible */
-    public static Reader openFirstReader() throws UareUException {
+    public static final Fmd.Format FMD_FORMAT = Fmd.Format.ANSI_378_2004;
+    public static final Fid.Format FID_FORMAT = Fid.Format.ANSI_381_2004;
+    public static final Reader.ImageProcessing IMG_PROC = Reader.ImageProcessing.IMG_PROC_DEFAULT;
+    public static final int DPI = 500;
+    public static final int DEFAULT_THRESHOLD = 21474; // FAR ~1e-5 aprox.
+
+    public static Reader openFirstReader() throws Exception {
         ReaderCollection readers = UareUGlobal.GetReaderCollection();
         readers.GetReaders();
-        if (readers == null || readers.isEmpty()) {
-            throw new IllegalStateException("No hay lector conectado");
+        if (readers.size() == 0) {
+            throw new IllegalStateException("No hay lectores conectados");
         }
         Reader r = readers.get(0);
-        r.Open(Reader.Priority.EXCLUSIVE);
+        r.Open(Reader.Priority.COOPERATIVE);
         return r;
-        // Nota: si prefieres PRIORITY.EXCLUSIVE, cámbialo aquí.
     }
 
-    /** Captura una imagen de huella (FID). timeoutMs: -1 = infinito */
-    public static Fid capture(Reader r, int timeoutMs) throws UareUException {
-        // Si te pasan -1, pon un timeout razonable (p.ej. 15s)
-        int effectiveTimeout = (timeoutMs <= 0) ? 15000 : timeoutMs;
-
-        // Descubre una resolución soportada por el lector
-        Reader.Capabilities caps = r.GetCapabilities();
-        int res = 500; // fallback
-        if (caps != null && caps.resolutions != null && caps.resolutions.length > 0) {
-            res = caps.resolutions[0]; // toma la primera soportada por el device
-        }
-
-        // Asegura que no hay captura previa pendiente
+    public static void closeQuietly(Reader r) {
+        if (r == null) return;
         try { r.CancelCapture(); } catch (Throwable ignore) {}
+        try { r.Close(); } catch (Throwable ignore) {}
+    }
 
-        Reader.CaptureResult cr = r.Capture(
-                Fid.Format.ANSI_381_2004,
-                Reader.ImageProcessing.IMG_PROC_DEFAULT,
-                res,
-                effectiveTimeout
-        );
-
-        if (cr == null || cr.image == null) {
-            throw new IllegalStateException("Captura nula o cancelada");
+    private static Fid extractFid(Object ret) throws Exception {
+        if (ret == null) return null;
+        try {
+            return (Fid) ret.getClass().getField("image").get(ret);
+        } catch (NoSuchFieldException nf) {
+            return (Fid) ret; // ya era Fid
         }
-        return cr.image;
     }
 
+    public static Fid capture(Reader r, int timeoutMs) throws Exception {
+        Reader.ImageProcessing piv = null;
+        try { piv = Reader.ImageProcessing.valueOf("IMG_PROC_PIV"); } catch (Throwable ignore) {}
 
-    /** Genera plantilla (FMD) a partir de una imagen FID */
-    public static Fmd toFmd(Fid fid) throws UareUException {
-        Engine engine = UareUGlobal.GetEngine();
-        return engine.CreateFmd(fid, Fmd.Format.ANSI_378_2004);
+        Reader.ImageProcessing[] ipCandidates = (piv == null)
+                ? new Reader.ImageProcessing[]{ IMG_PROC }
+                : new Reader.ImageProcessing[]{ IMG_PROC, piv };
+
+        int[] dpiCandidates = new int[]{ DPI, 0, 508 };
+        int[] toCandidates  = new int[]{ timeoutMs, Math.max(timeoutMs, 10_000), -1 };
+        boolean[] fakeCandidates = new boolean[]{ false, true };
+
+        Exception last = null;
+
+        try {
+            Method m5 = Reader.class.getMethod("Capture",
+                    Fid.Format.class, Reader.ImageProcessing.class, int.class, int.class, boolean.class);
+            for (Reader.ImageProcessing ip : ipCandidates) {
+                for (int dpi : dpiCandidates) {
+                    for (int to : toCandidates) {
+                        for (boolean fk : fakeCandidates) {
+                            try {
+                                Object ret = m5.invoke(r, FID_FORMAT, ip, dpi, to, fk);
+                                Fid fid = extractFid(ret);
+                                if (fid != null) return fid;
+                            } catch (InvocationTargetException ite) {
+                                last = ite.getCause() instanceof Exception ? (Exception) ite.getCause() : ite;
+                            } catch (Throwable t) { last = t instanceof Exception ? (Exception) t : new Exception(t); }
+                        }
+                    }
+                }
+            }
+        } catch (NoSuchMethodException ignore) {}
+
+        try {
+            Method m4 = Reader.class.getMethod("Capture",
+                    Fid.Format.class, Reader.ImageProcessing.class, int.class, int.class);
+            for (Reader.ImageProcessing ip : ipCandidates) {
+                for (int dpi : dpiCandidates) {
+                    for (int to : toCandidates) {
+                        try {
+                            Object ret = m4.invoke(r, FID_FORMAT, ip, dpi, to);
+                            Fid fid = extractFid(ret);
+                            if (fid != null) return fid;
+                        } catch (InvocationTargetException ite) {
+                            last = ite.getCause() instanceof Exception ? (Exception) ite.getCause() : ite;
+                        } catch (Throwable t) { last = t instanceof Exception ? (Exception) t : new Exception(t); }
+                    }
+                }
+            }
+        } catch (NoSuchMethodException ignore) {}
+
+        try {
+            Method m3 = Reader.class.getMethod("Capture",
+                    Fid.Format.class, Reader.ImageProcessing.class, int.class);
+            for (Reader.ImageProcessing ip : ipCandidates) {
+                for (int dpi : dpiCandidates) {
+                    try {
+                        Object ret = m3.invoke(r, FID_FORMAT, ip, dpi);
+                        Fid fid = extractFid(ret);
+                        if (fid != null) return fid;
+                    } catch (InvocationTargetException ite) {
+                        last = ite.getCause() instanceof Exception ? (Exception) ite.getCause() : ite;
+                    } catch (Throwable t) { last = t instanceof Exception ? (Exception) t : new Exception(t); }
+                }
+            }
+        } catch (NoSuchMethodException ignore) {}
+
+        String msg = (last != null && last.getMessage() != null) ? last.getMessage() : "sin detalle";
+        throw new IllegalStateException("No pude capturar huella; último error del SDK: " + msg);
     }
 
-    /** Verificación 1:1: true si coincide */
-    public static boolean verify(Fmd probe, Fmd reference) throws UareUException {
-        Engine engine = UareUGlobal.GetEngine();
-        int farTarget = 21474; // ~1/100000
-        Engine.Candidate[] cands = engine.Identify(
-                probe,                 // FMD a probar
-                0,                     // finger position (0 si no lo usas)
-                new Fmd[]{ reference },// “galería” (aquí N=1)
-                1,                     // candidatos a devolver
-                farTarget              // umbral FAR
-        );
-        return cands != null && cands.length > 0;
+    public static Fmd createFmd(Fid fid) throws Exception {
+        Object engine = UareUGlobal.GetEngine();
+        try {
+            Method m = engine.getClass().getMethod("CreateFmd", Fid.class, Fmd.Format.class);
+            return (Fmd) m.invoke(engine, fid, FMD_FORMAT);
+        } catch (NoSuchMethodException ignore) {}
+        try {
+            Method m = engine.getClass().getMethod("CreateFmd", Fid.class, Fmd.Format.class, int.class);
+            return (Fmd) m.invoke(engine, fid, FMD_FORMAT, 0);
+        } catch (NoSuchMethodException ignore) {}
+        throw new UnsupportedOperationException("No hay método compatible para crear FMD desde FID en este SDK.");
     }
 
+    public static Fmd createEnrollmentFmd(List<Fmd> samples) throws Exception {
+        if (samples == null || samples.isEmpty()) throw new IllegalArgumentException("samples vacío");
+        if (samples.size() == 1) return samples.get(0);
 
+        Object engine = UareUGlobal.GetEngine();
+        try {
+            Method m = engine.getClass().getMethod("CreateEnrollmentFmd", Fmd.Format.class, Fmd[].class);
+            return (Fmd) m.invoke(engine, FMD_FORMAT, samples.toArray(new Fmd[0]));
+        } catch (NoSuchMethodException ignore) {}
+        try {
+            Method m = engine.getClass().getMethod("CreateEnrollmentFmd", Fmd[].class);
+            return (Fmd) m.invoke(engine, (Object) samples.toArray(new Fmd[0]));
+        } catch (NoSuchMethodException ignore) {}
+        return samples.get(0);
+    }
 
-    /** Cierra el lector sin lanzar excepción */
-    public static void closeQuiet(Reader r) {
-        try { if (r != null) r.Close(); } catch (Exception ignore) {}
+    /** Devuelve el score bruto (menor = mejor). Si no hay API pública, devuelve null. */
+    public static Integer compareScore(Fmd a, Fmd b) throws Exception {
+        Object engine = UareUGlobal.GetEngine();
+        try {
+            Method cmp = engine.getClass().getMethod("Compare", Fmd.class, int.class, Fmd.class, int.class);
+            int score = (int) cmp.invoke(engine, a, 0, b, 0);
+            return score;
+        } catch (NoSuchMethodException ignore) {}
+        return null;
+    }
+
+    public static boolean matches(Fmd probe, Fmd reference, int threshold) throws Exception {
+        Integer score = compareScore(probe, reference);
+        if (score != null) return score < threshold;
+
+        Object engine = UareUGlobal.GetEngine();
+        try {
+            Method id = engine.getClass().getMethod("Identify", Fmd.class, int.class, Fmd[].class, int.class, int.class);
+            Object res = id.invoke(engine, probe, 0, new Fmd[]{ reference }, 1, threshold);
+            if (res == null) return false;
+            if (res.getClass().isArray()) {
+                return java.lang.reflect.Array.getLength(res) > 0;
+            }
+            return true;
+        } catch (NoSuchMethodException ignore) {}
+        throw new UnsupportedOperationException("No encontré métodos Compare/Identify compatibles en este SDK.");
+    }
+
+    public static java.util.List<Fmd> captureSamples(Reader r, int samples, java.util.function.Consumer<String> status) throws Exception {
+        java.util.List<Fmd> out = new java.util.ArrayList<>();
+        for (int i = 1; i <= samples; i++) {
+            if (status != null) status.accept("Coloca tu dedo (" + i + "/" + samples + ")...");
+            Fid fid = capture(r, 10_000);
+            if (status != null) status.accept("Imagen #" + i + " capturada. Levanta el dedo...");
+            Thread.sleep(800);
+            out.add(createFmd(fid));
+            if (status != null) status.accept("Muestra #" + i + " lista.");
+            Thread.sleep(400);
+        }
+        return out;
     }
 }
