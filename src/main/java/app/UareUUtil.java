@@ -18,7 +18,7 @@ public final class UareUUtil {
     public static final Fid.Format FID_FORMAT = Fid.Format.ANSI_381_2004;
     public static final Reader.ImageProcessing IMG_PROC = Reader.ImageProcessing.IMG_PROC_DEFAULT;
     public static final int DPI = 500;
-    public static final int DEFAULT_THRESHOLD = 21474; // FAR ~1e-5 aprox.
+    public static final int DEFAULT_THRESHOLD = 50000;
 
     public static Reader openFirstReader() throws Exception {
         ReaderCollection readers = UareUGlobal.GetReaderCollection();
@@ -39,11 +39,8 @@ public final class UareUUtil {
 
     private static Fid extractFid(Object ret) throws Exception {
         if (ret == null) return null;
-        try {
-            return (Fid) ret.getClass().getField("image").get(ret);
-        } catch (NoSuchFieldException nf) {
-            return (Fid) ret; // ya era Fid
-        }
+        try { return (Fid) ret.getClass().getField("image").get(ret); }
+        catch (NoSuchFieldException nf) { return (Fid) ret; }
     }
 
     public static Fid capture(Reader r, int timeoutMs) throws Exception {
@@ -147,21 +144,45 @@ public final class UareUUtil {
         return samples.get(0);
     }
 
-    /** Devuelve el score bruto (menor = mejor). Si no hay API pública, devuelve null. */
+    public static Integer bestScoreAllViews(Fmd a, Fmd b) throws Exception {
+        Object engine = UareUGlobal.GetEngine();
+        Method cmp;
+        try { cmp = engine.getClass().getMethod("Compare", Fmd.class, int.class, Fmd.class, int.class); }
+        catch (NoSuchMethodException e) { return null; }
+        int va = getViewCount(a);
+        int vb = getViewCount(b);
+        Integer best = null;
+        for (int i = 0; i < va; i++) {
+            for (int j = 0; j < vb; j++) {
+                int score = (int) cmp.invoke(engine, a, i, b, j);
+                if (best == null || score < best) best = score;
+            }
+        }
+        return best;
+    }
+
+    public static int getViewCount(Fmd f) {
+        try { Method m = Fmd.class.getMethod("getViews"); Object arr = m.invoke(f);
+            if (arr != null && arr.getClass().isArray()) return java.lang.reflect.Array.getLength(arr); } catch (Throwable ignore) {}
+        try { Method m = Fmd.class.getMethod("getViewCount"); Object ret = m.invoke(f);
+            if (ret instanceof Integer) return (Integer) ret; } catch (Throwable ignore) {}
+        return 1;
+    }
+
     public static Integer compareScore(Fmd a, Fmd b) throws Exception {
         Object engine = UareUGlobal.GetEngine();
         try {
             Method cmp = engine.getClass().getMethod("Compare", Fmd.class, int.class, Fmd.class, int.class);
-            int score = (int) cmp.invoke(engine, a, 0, b, 0);
-            return score;
+            return (int) cmp.invoke(engine, a, 0, b, 0);
         } catch (NoSuchMethodException ignore) {}
         return null;
     }
 
     public static boolean matches(Fmd probe, Fmd reference, int threshold) throws Exception {
-        Integer score = compareScore(probe, reference);
+        Integer score = bestScoreAllViews(probe, reference);
         if (score != null) return score < threshold;
-
+        Integer score0 = compareScore(probe, reference);
+        if (score0 != null) return score0 < threshold;
         Object engine = UareUGlobal.GetEngine();
         try {
             Method id = engine.getClass().getMethod("Identify", Fmd.class, int.class, Fmd[].class, int.class, int.class);
@@ -175,8 +196,8 @@ public final class UareUUtil {
         throw new UnsupportedOperationException("No encontré métodos Compare/Identify compatibles en este SDK.");
     }
 
-    public static java.util.List<Fmd> captureSamples(Reader r, int samples, java.util.function.Consumer<String> status) throws Exception {
-        java.util.List<Fmd> out = new java.util.ArrayList<>();
+    public static List<Fmd> captureSamples(Reader r, int samples, java.util.function.Consumer<String> status) throws Exception {
+        List<Fmd> out = new ArrayList<>();
         for (int i = 1; i <= samples; i++) {
             if (status != null) status.accept("Coloca tu dedo (" + i + "/" + samples + ")...");
             Fid fid = capture(r, 10_000);

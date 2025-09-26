@@ -27,6 +27,12 @@
             <version>${javafx.version}</version>
         </dependency>
 
+        <dependency>
+            <groupId>com.machinezoo.sourceafis</groupId>
+            <artifactId>sourceafis</artifactId>
+            <version>3.18.1</version>
+        </dependency>
+
         <!-- JARs locales del SDK / JavaPOS -->
         <dependency>
             <groupId>com.jpos</groupId>

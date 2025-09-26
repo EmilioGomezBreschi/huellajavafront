@@ -7,24 +7,23 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.util.Locale;
 
-/** Cliente HTTP para enrolar y verificar huellas, con strings JSON sin escapes raros. */
+/** Cliente para tu backend. Enrolamiento + listado de huellas + creación de operador. */
 public final class FingerApi {
     private static final HttpClient HTTP = HttpClient.newHttpClient();
 
-    // Cambia esto si tu dominio/base cambia
+    /** Ajusta si tu dominio/base cambia. */
     private static final String BASE = "https://lector-hxgfchbqfec8fxcd.canadacentral-01.azurewebsites.net";
     private static final String PATH_TEMPLATE = "/api/huella/%d/huella";
     private static final String PATH_LIST = "/api/huella";
+    private static final String PATH_OPERADORES = "/api/operadores";
 
     private FingerApi() {}
 
-    // ===== Tipos =====
     public static class FingerprintRecord {
         public final int idOperador;
-        public final String fmdBase64;
+        public final String fmdBase64;  // puede venir en 'fmd' en tu JSON
         public final String fmdFormat;
         public FingerprintRecord(int idOperador, String fmdBase64, String fmdFormat) {
             this.idOperador = idOperador;
@@ -33,72 +32,77 @@ public final class FingerApi {
         }
     }
 
-    // ===== Enrolar =====
+    /** POST /api/operadores → crea el operador; el backend asigna idOperador (autoincrement). */
+    public static int createOperador(String nombre, String apellidoPaterno, String apellidoMaterno, String numeroOperador) throws Exception {
+        // Construimos JSON sin idOperador ni fingerId (los maneja el backend)
+        String json = "{"
+                + "\"nombre\":\"" + jsonEsc(nombre) + "\","
+                + "\"apellidoPaterno\":\"" + jsonEsc(apellidoPaterno) + "\","
+                + "\"apellidoMaterno\":\"" + jsonEsc(apellidoMaterno) + "\","
+                + "\"numeroOperador\":\"" + jsonEsc(numeroOperador) + "\""
+                + "}";
+
+        HttpResponse<String> resp = sendJson("POST", BASE + PATH_OPERADORES, json);
+        if (resp.statusCode() / 100 != 2 && resp.statusCode() != 201) {
+            throw new IllegalStateException("POST /api/operadores -> " + resp.statusCode() + " " + acorta(resp.body()));
+        }
+        // Intentamos leer idOperador del body (en cualquiera de estos nombres)
+        Integer id = extractIntJson(resp.body(), "idOperador");
+        if (id == null) id = extractIntJson(resp.body(), "id_operador");
+        if (id == null) id = extractIntJson(resp.body(), "operadorId");
+        if (id == null) throw new IllegalStateException("No se encontró idOperador en la respuesta: " + acorta(resp.body()));
+        return id;
+    }
+
+    /** Enrolamiento: envía la huella del operador (fingerId lo asigna el backend). */
     public static String enroll(int idOperador, String fmdBase64, String fmdFormat) throws Exception {
         String path = String.format(PATH_TEMPLATE, idOperador);
-        String json = buildEnrollJson(fmdBase64, fmdFormat);
-
-        // Intento POST
+        String json = "{"
+                + "\"fmdBase64\":\"" + jsonEsc(fmdBase64) + "\","
+                + "\"fmdFormat\":\"" + jsonEsc(fmdFormat) + "\""
+                + "}";
         HttpResponse<String> resp = sendJson("POST", BASE + path, json);
         int sc = resp.statusCode();
         if (sc == 404 || sc == 405) {
-            // fallback PUT
             HttpResponse<String> resp2 = sendJson("PUT", BASE + path, json);
             return "[POST->" + sc + "] [PUT->" + resp2.statusCode() + "] " + resp2.body();
         }
         return sc + " " + resp.body();
     }
 
-    // ===== GET uno =====
+    /** GET /api/huella/{id}/huella (opcional para debug). */
     public static String getHuella(int idOperador) throws Exception {
         String path = String.format(PATH_TEMPLATE, idOperador);
         HttpRequest req = HttpRequest.newBuilder()
                 .uri(URI.create(BASE + path))
-                .GET()
-                .header("Accept", "application/json")
+                .GET().header("Accept", "application/json")
                 .build();
         HttpResponse<String> resp = HTTP.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
         return resp.statusCode() + " " + resp.body();
     }
 
-    // ===== GET lista =====
+    /** GET /api/huella -> lista con (idOperador, fmd|fmdBase64, fmdFormat). */
     public static List<FingerprintRecord> listAll() throws Exception {
         HttpRequest req = HttpRequest.newBuilder()
                 .uri(URI.create(BASE + PATH_LIST))
-                .GET()
-                .header("Accept", "application/json")
+                .GET().header("Accept", "application/json")
                 .build();
         HttpResponse<String> resp = HTTP.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-        if (resp.statusCode() / 100 != 2) {
-            throw new IllegalStateException("GET /api/huella -> " + resp.statusCode() + " " + resp.body());
-        }
+        if (resp.statusCode() / 100 != 2) throw new IllegalStateException("GET /api/huella -> " + resp.statusCode());
         return parseFingerprintArray(resp.body());
     }
 
-    // ===== Helpers =====
+    // ---------- Helpers ----------
     private static HttpResponse<String> sendJson(String method, String url, String json) throws Exception {
         HttpRequest.BodyPublisher body = HttpRequest.BodyPublishers.ofString(json, StandardCharsets.UTF_8);
-        HttpRequest.Builder b = HttpRequest.newBuilder()
-                .uri(URI.create(url))
+        HttpRequest.Builder b = HttpRequest.newBuilder().uri(URI.create(url))
                 .header("Content-Type", "application/json; charset=utf-8");
-        if ("POST".equalsIgnoreCase(method)) {
-            b = b.POST(body);
-        } else if ("PUT".equalsIgnoreCase(method)) {
-            b = b.PUT(body);
-        } else {
-            throw new IllegalArgumentException("Método no soportado: " + method);
-        }
+        if ("POST".equalsIgnoreCase(method)) b = b.POST(body);
+        else if ("PUT".equalsIgnoreCase(method)) b = b.PUT(body);
+        else throw new IllegalArgumentException("Método no soportado: " + method);
         return HTTP.send(b.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
     }
 
-    private static String buildEnrollJson(String fmdBase64, String fmdFormat) {
-        return "{"
-                + "\"fmdBase64\":\"" + jsonEsc(fmdBase64) + "\","
-                + "\"fmdFormat\":\"" + jsonEsc(fmdFormat) + "\""
-                + "}";
-    }
-
-    /** Escapado JSON mínimo para strings. */
     private static String jsonEsc(String s) {
         if (s == null) return "";
         StringBuilder sb = new StringBuilder(s.length() + 16);
@@ -113,94 +117,144 @@ public final class FingerApi {
                 case '\r': sb.append("\\r"); break;
                 case '\t': sb.append("\\t"); break;
                 default:
-                    if (c < 0x20) {
-                        sb.append(String.format("\\u%04x", (int) c));
-                    } else {
-                        sb.append(c);
-                    }
+                    if (c < 0x20) sb.append(String.format("\\u%04x", (int) c));
+                    else sb.append(c);
             }
         }
         return sb.toString();
     }
 
-    // ===== Parser simple del array JSON =====
-    private static final Pattern OBJ = Pattern.compile("\\{[^\\{\\}]*\\}");
-    private static final Pattern P_ID = Pattern.compile("\"idOperador\"\\s*:\\s*(\\d+)");
-    private static final Pattern P_FMD = Pattern.compile("\"(?:fmdBase64|fmd)\"\\s*:\\s*\"([^\"]*)\"");
-    private static final Pattern P_FMT = Pattern.compile("\"fmdFormat\"\\s*:\\s*\"([^\"]*)\"");
+    private static String acorta(String s) {
+        if (s == null) return "—";
+        s = s.replaceAll("\\s+", " ");
+        return s.length() > 200 ? s.substring(0, 200) + "..." : s;
+    }
 
+    /** Parser robusto para tu JSON (acepta 'fmd' o 'fmdBase64'; 'fmdFormat' opcional). */
     private static List<FingerprintRecord> parseFingerprintArray(String json) {
         List<FingerprintRecord> out = new ArrayList<>();
-        if (json == null || json.isEmpty()) return out;
+        if (json == null) return out;
 
-        Matcher m = OBJ.matcher(json);
-        while (m.find()) {
-            String obj = m.group();
-            Integer id = extractInt(obj, P_ID);
-            if (id == null) continue;
-            String b64 = extractString(obj, P_FMD);
-            if (b64 == null || b64.isEmpty()) continue;
-            String fmt = extractString(obj, P_FMT);
+        int i = json.indexOf('[');
+        int j = json.lastIndexOf(']');
+        String array = (i >= 0 && j > i) ? json.substring(i + 1, j) : json;
+
+        List<String> objs = splitTopLevelObjects(array);
+        for (String obj : objs) {
+            Integer idOperador = extractInt(obj, "idOperador");
+            if (idOperador == null) idOperador = extractInt(obj, "id_operador");
+            if (idOperador == null) idOperador = extractInt(obj, "operadorId");
+            if (idOperador == null) continue;
+
+            String fmd = extractString(obj, "fmdBase64");
+            if (fmd == null) fmd = extractString(obj, "fmd");
+            if (fmd == null || fmd.isEmpty()) continue;
+
+            String fmt = extractString(obj, "fmdFormat");
             if (fmt == null || fmt.isEmpty()) fmt = "ANSI_378_2004";
-            out.add(new FingerprintRecord(id, b64, fmt));
+
+            out.add(new FingerprintRecord(idOperador, fmd, fmt));
         }
         return out;
     }
 
-    private static Integer extractInt(String s, Pattern p) {
-        Matcher m = p.matcher(s);
-        if (m.find()) {
-            try { return Integer.parseInt(m.group(1)); } catch (NumberFormatException ignore) {}
-        }
-        return null;
-    }
-
-    private static String extractString(String s, Pattern p) {
-        Matcher m = p.matcher(s);
-        if (m.find()) {
-            return unescapeJsonString(m.group(1));
-        }
-        return null;
-    }
-
-    /** Desescapa las secuencias básicas de un string JSON. */
-    private static String unescapeJsonString(String s) {
-        StringBuilder sb = new StringBuilder(s.length());
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            if (c == '\\') {
-                if (i + 1 >= s.length()) break;
-                char n = s.charAt(i + 1);
-                switch (n) {
-                    case '\"': sb.append('\"'); i++; break;
-                    case '\\': sb.append('\\'); i++; break;
-                    case '/':  sb.append('/');  i++; break;
-                    case 'b':  sb.append('\b'); i++; break;
-                    case 'f':  sb.append('\f'); i++; break;
-                    case 'n':  sb.append('\n'); i++; break;
-                    case 'r':  sb.append('\r'); i++; break;
-                    case 't':  sb.append('\t'); i++; break;
-                    case 'u':
-                        if (i + 5 < s.length()) {
-                            String hex = s.substring(i + 2, i + 6);
-                            try {
-                                sb.append((char) Integer.parseInt(hex, 16));
-                                i += 5;
-                                break;
-                            } catch (Exception ignore) { /* cae a default */ }
-                        }
-                        // si falló, dejamos tal cual
-                        sb.append('\\');
-                        break;
-                    default:
-                        sb.append(n);
-                        i++;
-                        break;
-                }
-            } else {
-                sb.append(c);
+    private static List<String> splitTopLevelObjects(String array) {
+        List<String> out = new ArrayList<>();
+        if (array == null) return out;
+        int level = 0; boolean inStr = false;
+        StringBuilder cur = new StringBuilder();
+        for (int k = 0; k < array.length(); k++) {
+            char c = array.charAt(k);
+            if (inStr) {
+                cur.append(c);
+                if (c == '\\' && k + 1 < array.length()) { cur.append(array.charAt(++k)); }
+                else if (c == '\"') inStr = false;
+                continue;
             }
+            if (c == '\"') { inStr = true; cur.append(c); continue; }
+            if (c == '{')  { level++; cur.append(c); continue; }
+            if (c == '}')  { level--; cur.append(c); if (level == 0) { out.add(cur.toString()); cur.setLength(0); } continue; }
+            if (level > 0) cur.append(c);
         }
-        return sb.toString();
+        return out;
+    }
+
+    private static Integer extractInt(String obj, String key) {
+        String s = extractString(obj, key);
+        if (s == null) return null;
+        try { return Integer.parseInt(s); } catch (NumberFormatException nfe) { return null; }
+    }
+
+    private static String extractString(String obj, String key) {
+        String k = "\"" + key.toLowerCase(Locale.ROOT) + "\"";
+        int i = obj.toLowerCase(Locale.ROOT).indexOf(k);
+        if (i < 0) return null;
+        int colon = obj.indexOf(':', i + k.length());
+        if (colon < 0) return null;
+        int p = colon + 1;
+        while (p < obj.length() && Character.isWhitespace(obj.charAt(p))) p++;
+
+        if (p < obj.length() && obj.charAt(p) == '\"') {
+            StringBuilder sb = new StringBuilder();
+            p++;
+            while (p < obj.length()) {
+                char c = obj.charAt(p++);
+                if (c == '\\') {
+                    if (p < obj.length()) {
+                        char n = obj.charAt(p++);
+                        switch (n) {
+                            case '\"': sb.append('\"'); break;
+                            case '\\': sb.append('\\'); break;
+                            case '/':  sb.append('/');  break;
+                            case 'b':  sb.append('\b'); break;
+                            case 'f':  sb.append('\f'); break;
+                            case 'n':  sb.append('\n'); break;
+                            case 'r':  sb.append('\r'); break;
+                            case 't':  sb.append('\t'); break;
+                            case 'u':
+                                if (p + 4 <= obj.length()) {
+                                    String hex = obj.substring(p, p + 4);
+                                    try { sb.append((char) Integer.parseInt(hex, 16)); } catch (Exception ignore) {}
+                                    p += 4;
+                                }
+                                break;
+                            default: sb.append(n);
+                        }
+                    }
+                } else if (c == '\"') {
+                    break;
+                } else {
+                    sb.append(c);
+                }
+            }
+            return sb.toString();
+        } else {
+            int end = p;
+            while (end < obj.length()) {
+                char c = obj.charAt(end);
+                if (c == ',' || c == '}' || c == ']') break;
+                end++;
+            }
+            return obj.substring(p, end).trim();
+        }
+    }
+
+    private static Integer extractIntJson(String json, String key) {
+        if (json == null) return null;
+        String lower = json.toLowerCase(Locale.ROOT);
+        String k = "\"" + key.toLowerCase(Locale.ROOT) + "\"";
+        int i = lower.indexOf(k);
+        if (i < 0) return null;
+        int colon = json.indexOf(':', i + k.length());
+        if (colon < 0) return null;
+        int p = colon + 1;
+        while (p < json.length() && Character.isWhitespace(json.charAt(p))) p++;
+        int end = p;
+        while (end < json.length()) {
+            char c = json.charAt(end);
+            if (c == ',' || c == '}' || c == ']') break;
+            end++;
+        }
+        try { return Integer.parseInt(json.substring(p, end).trim()); } catch (Exception e) { return null; }
     }
 }
